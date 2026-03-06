@@ -1,3 +1,3 @@
 #!/bin/bash
-# 添加 SmartDNS 源码
+# 自动安装 SmartDNS
 git clone https://github.com/pymumu/openwrt-smartdns package/smartdns
