@@ -1,11 +1,11 @@
-name: OpenWrt-Official-25.12-Build
+name: OpenWrt-Official-25.12-Integrated-Build
 
 on:
   workflow_dispatch:
 
 env:
   REPO_URL: https://github.com/openwrt/openwrt.git
-  REPO_BRANCH: master # 或者指定 v23.05.x 等稳定分支
+  REPO_BRANCH: master
   TZ: Asia/Shanghai
 
 jobs:
@@ -13,7 +13,10 @@ jobs:
     runs-on: ubuntu-22.04
 
     steps:
-    - name: 1. 清理磁盘并安装依赖
+    - name: 1. 检出仓库代码
+      uses: actions/checkout@v4
+
+    - name: 2. 清理磁盘空间 (分步骤清理)
       run: |
         sudo rm -rf /usr/share/dotnet /etc/mysql /usr/local/lib/android /opt/ghc
         sudo -E apt-get -qq update
@@ -22,36 +25,41 @@ jobs:
         sudo -E apt-get -qq clean
         df -h
 
-    - name: 2. 检出源码与更新 Feeds
+    - name: 3. 克隆源码与更新 Feeds (包含第三方源)
       run: |
         git clone $REPO_URL openwrt
         cd openwrt
-        [ -e ../feeds.conf.default ] && cp ../feeds.conf.default ./feeds.conf.default
+        # 添加 Passwall 和 SmartDNS 源
+        echo "src-git passwall_packages https://github.com/xiaorouji/openwrt-passwall-packages.git" >> feeds.conf.default
+        echo "src-git passwall_luci https://github.com/xiaorouji/openwrt-passwall.git" >> feeds.conf.default
+        git clone https://github.com/pymumu/openwrt-smartdns package/smartdns
+        
         ./scripts/feeds update -a
         ./scripts/feeds install -a
 
-    - name: 3. 注入官方版 .config
+    - name: 4. 注入配置与 DIY 修改 (整合 diy-part2)
       run: |
         cd openwrt
-        # 目标平台配置
+        
+        # --- 基础架构配置 ---
         echo "CONFIG_TARGET_x86=y" >> .config
         echo "CONFIG_TARGET_x86_64=y" >> .config
         echo "CONFIG_TARGET_x86_64_DEVICE_generic=y" >> .config
         
-        # 基础组件与语言
+        # --- 界面、语言与主题 (Bootstrap) ---
         echo "CONFIG_PACKAGE_luci=y" >> .config
         echo "CONFIG_PACKAGE_luci-theme-bootstrap=y" >> .config
         echo "CONFIG_PACKAGE_luci-i18n-base-zh-cn=y" >> .config
         echo "CONFIG_PACKAGE_luci-proto-ipv6=y" >> .config
         
-        # 网卡驱动: Intel E1000/E1000E & USB
+        # --- 网卡驱动 (Intel E1000 & USB) ---
         echo "CONFIG_PACKAGE_kmod-e1000=y" >> .config
         echo "CONFIG_PACKAGE_kmod-e1000e=y" >> .config
         echo "CONFIG_PACKAGE_kmod-usb-net=y" >> .config
         echo "CONFIG_PACKAGE_kmod-usb-net-rtl8152=y" >> .config
         echo "CONFIG_PACKAGE_kmod-usb-net-asix-ax88179=y" >> .config
         
-        # 插件集 (不含内核)
+        # --- 插件集 ---
         echo "CONFIG_PACKAGE_luci-app-passwall=y" >> .config
         echo "CONFIG_PACKAGE_luci-app-adguardhome=y" >> .config
         echo "CONFIG_PACKAGE_luci-app-smartdns=y" >> .config
@@ -60,25 +68,29 @@ jobs:
         echo "CONFIG_PACKAGE_luci-app-syncdial=y" >> .config
         echo "CONFIG_PACKAGE_luci-app-mwan3=y" >> .config
 
-        # 执行 DIY 脚本
-        chmod +x ../diy-part2.sh
-        ../diy-part2.sh
-        
+        # --- DIY 修改: 移除内核依赖 & 修改 IP ---
+        sed -i 's/192.168.1.1/192.168.1.1/g' package/base-files/files/bin/config_generate
+        # 强制移除 Passwall 核心依赖
+        find package/feeds/passwall_luci/ -name "Makefile" | xargs sed -i 's/+xray-core//g'
+        find package/feeds/passwall_luci/ -name "Makefile" | xargs sed -i 's/+v2ray-core//g'
+        # 强制移除 AdGuardHome 核心依赖
+        find feeds/luci/applications/luci-app-adguardhome/ -name "Makefile" | xargs sed -i 's/+adguardhome-core//g'
+
         make defconfig
 
-    - name: 4. 下载软件包
+    - name: 5. 预下载软件包 (dl)
       run: |
         cd openwrt
         make download -j8
         find dl -size -1024c -exec rm -f {} \;
 
-    - name: 5. 编译 (分步执行以防报错)
+    - name: 6. 核心编译
       run: |
         cd openwrt
         make -j$(nproc) || make -j1 V=s
 
-    - name: 6. 上传结果
+    - name: 7. 整理并上传固件
       uses: actions/upload-artifact@v4
       with:
-        name: OpenWrt_Official_Generic_Artifacts
+        name: OpenWrt_Official_X86_64
         path: openwrt/bin/targets/x86/64/*
